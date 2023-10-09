@@ -25,7 +25,7 @@ use time::Date;
 type Frame<'a> = ratatui::Frame<'a, CrosstermBackend<Stdout>>;
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
-const DATABASE_URL: &str = "sqlite::memory:";
+const DATABASE_URL: &str = "./data.db3";
 
 #[derive(Debug)]
 struct Period {
@@ -44,6 +44,22 @@ enum Flow {
     Medium,
     Heavy,
     Apocalyptic,
+}
+
+impl TryFrom<u8> for Flow {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Flow::None),
+            1 => Ok(Flow::Spotting),
+            2 => Ok(Flow::Light),
+            3 => Ok(Flow::Medium),
+            4 => Ok(Flow::Heavy),
+            5 => Ok(Flow::Apocalyptic),
+            _ => Err("Unsupported flow quantifier".to_string()),
+        }
+    }
 }
 
 const FLOW_OPTION: [Flow; 6] = [
@@ -88,9 +104,9 @@ fn restore_terminal(mut terminal: Terminal) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let conn = Connection::open_in_memory()?;
+    let conn = Connection::open(DATABASE_URL)?;
     conn.execute(
-        "CREATE TABLE period (logdate date PRIMARY KEY, flow TINYINT);",
+        "CREATE TABLE if not exists period (logdate date PRIMARY KEY, flow TINYINT);",
         (),
     )?;
     loop {
@@ -98,9 +114,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         let flow = Select::new("Select flow intensity", FLOW_OPTION.to_vec()).prompt()?;
         if Confirm::new(&format!("Save {flow} flow for {date} ?")).prompt()? {
             // save
-
+            let mut stmt = conn.prepare("SELECT * FROM period WHERE logdate = ?;")?;
+            if let Some(old) = stmt
+                .query_and_then((date,), |row| row.get::<_, u8>(1))?
+                .next()
+            {
+                if Confirm::new(&format!(
+                    "Data {} already present at {date}, overwrite it ?",
+                    Flow::try_from(old?)?
+                ))
+                .prompt()?
+                {
+                    conn.execute("DELETE FROM period  WHERE logdate = ?;", (date,))?;
+                } else {
+                    continue;
+                }
+            };
             conn.execute(
-                "INSERT INTO period (logdate, flow) VALUES (?1, ?2);",
+                "INSERT INTO period (logdate, flow) VALUES (?1, ?2);;",
                 (date, flow as u8),
             )?;
         }
