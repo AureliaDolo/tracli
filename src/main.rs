@@ -4,26 +4,29 @@ use std::{
     io::{stdout, Stdout},
 };
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, Utc};
 use crossterm::{
+    event::{self, Event::Key, KeyCode::Char},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use inquire::{Confirm, DateSelect, Select};
 use ratatui::{
-    prelude::CrosstermBackend,
-    style::Style,
+    prelude::*,
     widgets::{
         calendar::{CalendarEventStore, Monthly},
-        Widget,
+        Block, Borders,
     },
+};
+use ratatui::{
+    prelude::{CrosstermBackend, Terminal},
+    widgets::Paragraph,
 };
 
 use rusqlite::Connection;
 use time::Date;
 
-type Frame<'a> = ratatui::Frame<'a, CrosstermBackend<Stdout>>;
-type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
+pub type Frame<'a> = ratatui::Frame<'a, CrosstermBackend<std::io::Stderr>>;
 
 const DATABASE_URL: &str = "./data.db3";
 
@@ -84,26 +87,99 @@ impl Display for Flow {
     }
 }
 
-fn ui(frame: &mut Frame, widget: impl Widget) {
-    frame.render_widget(widget, frame.size())
+struct App {
+    state: i64,
+    should_quit: bool,
 }
 
-fn setup_terminal() -> Result<Terminal, Box<dyn Error>> {
+fn startup() -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+    execute!(std::io::stderr(), EnterAlternateScreen)?;
+    Ok(())
 }
 
-fn restore_terminal(mut terminal: Terminal) -> Result<(), Box<dyn Error>> {
+fn shutdown() -> Result<(), Box<dyn Error>> {
+    execute!(std::io::stderr(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+fn ui(app: &App, f: &mut Frame<'_>) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(f.size());
+    f.render_widget(
+        Paragraph::new(format!("Counter: {}", app.state)).block(Block::new().borders(Borders::ALL)),
+        layout[0],
+    );
+    let date = Utc::now().date_naive();
+    let c = Monthly::new(
+        Date::from_calendar_date(
+            date.year(),
+            time::Month::try_from(date.month() as u8).unwrap(),
+            date.day() as u8,
+        )
+        .unwrap(),
+        CalendarEventStore::default(),
+    )
+    .show_weekdays_header(Style::default())
+    .show_month_header(Style::default());
+    f.render_widget(c.block(Block::new().borders(Borders::ALL)), layout[1]);
+}
+
+fn update(app: &mut App) -> Result<(), Box<dyn Error>> {
+    if event::poll(std::time::Duration::from_millis(250))? {
+        if let Key(key) = event::read()? {
+            if key.kind == event::KeyEventKind::Press {
+                match key.code {
+                    Char('j') => app.state += 1,
+                    Char('k') => app.state -= 1,
+                    Char('q') => app.should_quit = true,
+                    _ => (),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    // ratatui terminal
+    let mut t = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
+
+    // application state
+    let mut app = App {
+        state: 0,
+        should_quit: false,
+    };
+
+    loop {
+        // application render
+        t.draw(|f| {
+            ui(&app, f);
+        })?;
+
+        // application update
+        update(&mut app)?;
+
+        // application exit
+        if app.should_quit {
+            break;
+        }
+    }
+
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    startup()?;
+    let status = run();
+    shutdown()?;
+    status?;
+    Ok(())
+}
+fn notmain() -> Result<(), Box<dyn Error>> {
     let conn = Connection::open(DATABASE_URL)?;
     conn.execute(
         "CREATE TABLE if not exists period (logdate date PRIMARY KEY, flow TINYINT);",
